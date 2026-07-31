@@ -1,5 +1,3 @@
-https://roadmap.sh/projects/todo-list-api
-
 # Todo-List-API
 
 RESTful API for managing a to-do list with custom user authentication (JWT + rotating refresh tokens), built in Node.js with an MVC architecture.
