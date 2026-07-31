@@ -4,6 +4,7 @@ const REQUIRED_ENVS = [
   "DATABASE_URL",
   "JWT_ACCESS_SECRET",
   "JWT_REFRESH_SECRET",
+  "NODE_ENV",
 ];
 const PORT = parseInt(process.env.PORT || "3000", 10);
 
@@ -25,6 +26,8 @@ const rawConfig = {
   DATABASE_URL: process.env.DATABASE_URL,
   JWT_ACCESS_SECRET: process.env.JWT_ACCESS_SECRET,
   JWT_REFRESH_SECRET: process.env.JWT_REFRESH_SECRET,
+  NODE_ENV: process.env.NODE_ENV || "development",
+  REFRESH_TOKEN_TTL_MS: 7 * 24 * 60 * 60 * 1000,
 };
 
 function deepFreeze(obj) {

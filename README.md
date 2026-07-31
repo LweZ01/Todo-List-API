@@ -1,156 +1,290 @@
 # Todo-List-API
 
+RESTful API for managing a to-do list with custom user authentication (JWT + rotating refresh tokens), built in Node.js with an MVC architecture.
+
+## Features
+
+- User registration and login with hashed passwords (bcrypt)
+- Authentication via short-lived JWT access tokens + rotating refresh tokens delivered as an httpOnly cookie
+- Revoked refresh token reuse detection (revokes all active sessions for the user as a security measure)
+- Full CRUD for tasks, protected by authentication and per-resource ownership validation
+- Paginated task listing
+- Input validation with Zod
+- Centralized error handling
+- Rate limiting on authentication endpoints
+- Security headers via Helmet
+
+## Stack
+
+- Runtime: Node.js + Express
+- Database: PostgreSQL (Supabase)
+- Authentication: JWT (jsonwebtoken) + bcrypt
+- Validation: Zod
+- Security: Helmet, express-rate-limit
+
+## Architecture
+
+MVC (Model-View-Controller) architecture, separating responsibilities into layers:
+
+```
 todo-list-api/
 ├── src/
-│ ├── config/
-│ │ ├── env.js # validación fail-fast de env
-│ │ └── db.js # conexión/pool a Supabase Postgres
-│ ├── models/
-│ │ ├── user.model.js
-│ │ ├── todo.model.js
-│ │ └── refreshToken.model.js
-│ ├── controllers/
-│ │ ├── auth.controller.js
-│ │ └── todo.controller.js
-│ ├── services/
-│ │ ├── auth.service.js
-│ │ └── todo.service.js
-│ ├── routes/
-│ │ ├── auth.routes.js
-│ │ └── todo.routes.js
-│ ├── middlewares/
-│ │ ├── authenticate.js
-│ │ └── errorHandler.js
-│ ├── utils/
-│ │ └── ApiError.js
-│ └── app.js
+│   ├── config/
+│   │   ├── env.js              # Fail-fast environment variable validation
+│   │   └── db.js                # Supabase Postgres connection pool
+│   ├── models/
+│   │   ├── user.model.js
+│   │   ├── todo.model.js
+│   │   └── refreshToken.model.js
+│   ├── controllers/
+│   │   ├── auth.controller.js
+│   │   └── todo.controller.js
+│   ├── services/
+│   │   ├── auth.service.js      # Business logic: hashing, token issuance and rotation
+│   │   └── todo.service.js      # Business logic: ownership validation
+│   ├── routes/
+│   │   ├── auth.routes.js
+│   │   └── todo.routes.js
+│   ├── middlewares/
+│   │   ├── authenticate.js      # JWT verification
+│   │   ├── validate.js          # Body/query validation with Zod
+│   │   ├── rateLimiter.js
+│   │   └── errorHandler.js      # Centralized error handling
+│   ├── validations/
+│   │   ├── auth.validation.js
+│   │   └── todo.validation.js
+│   ├── utils/
+│   │   ├── ApiError.js
+│   │   └── cookies.js
+│   └── app.js
 ├── .env.example
-├── .env (gitignored)
+├── .env                          # (gitignored)
 ├── package.json
 └── package-lock.json
+```
 
-Database Schema
+Models are implemented as classes with static methods (stateless data access). Services and controllers are implemented as classes with constructor-based dependency injection, favoring decoupling and testability.
 
--- Extensión para generar UUIDs
+## Database Schema
+
+Normalized design (3NF) with foreign keys and explicit indexes on columns used in frequent filters.
+
+```sql
+-- Extension to generate UUIDs
 CREATE EXTENSION IF NOT EXISTS pgcrypto;
 
--- Tabla users
+-- users table
 CREATE TABLE users (
-id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
-name VARCHAR NOT NULL,
-email VARCHAR UNIQUE NOT NULL,
-password_hash TEXT NOT NULL,
-created_at TIMESTAMPTZ DEFAULT now()
+    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    name VARCHAR NOT NULL,
+    email VARCHAR UNIQUE NOT NULL,
+    password_hash TEXT NOT NULL,
+    created_at TIMESTAMPTZ DEFAULT now()
 );
 
--- Tabla todos
+-- todos table
 CREATE TABLE todos (
-id SERIAL PRIMARY KEY,
-user_id UUID NOT NULL REFERENCES users(id) ON DELETE CASCADE,
-title VARCHAR NOT NULL,
-description TEXT,
-completed BOOLEAN DEFAULT false,
-created_at TIMESTAMPTZ DEFAULT now(),
-updated_at TIMESTAMPTZ DEFAULT now()
+    id SERIAL PRIMARY KEY,
+    user_id UUID NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+    title VARCHAR NOT NULL,
+    description TEXT,
+    completed BOOLEAN DEFAULT false,
+    created_at TIMESTAMPTZ DEFAULT now(),
+    updated_at TIMESTAMPTZ DEFAULT now()
 );
 
 CREATE INDEX idx_todos_user_id ON todos(user_id);
 
--- Tabla refresh_tokens
+-- refresh_tokens table
 CREATE TABLE refresh_tokens (
-id SERIAL PRIMARY KEY,
-user_id UUID NOT NULL REFERENCES users(id) ON DELETE CASCADE,
-token_hash TEXT NOT NULL,
-expires_at TIMESTAMPTZ NOT NULL,
-revoked BOOLEAN DEFAULT false,
-created_at TIMESTAMPTZ DEFAULT now()
+    id SERIAL PRIMARY KEY,
+    user_id UUID NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+    token_hash TEXT NOT NULL,
+    expires_at TIMESTAMPTZ NOT NULL,
+    revoked BOOLEAN DEFAULT false,
+    created_at TIMESTAMPTZ DEFAULT now()
 );
 
 CREATE INDEX idx_refresh_tokens_user_id ON refresh_tokens(user_id);
 CREATE INDEX idx_refresh_tokens_token_hash ON refresh_tokens(token_hash);
 
--- Trigger para updated_at en todos
+-- Trigger to automatically update updated_at on every UPDATE
 CREATE OR REPLACE FUNCTION set_updated_at()
 RETURNS TRIGGER AS $$
 BEGIN
-NEW.updated_at = now();
-RETURN NEW;
+    NEW.updated_at = now();
+    RETURN NEW;
 END;
-
-$$
-LANGUAGE plpgsql;
+$$ LANGUAGE plpgsql;
 
 CREATE TRIGGER trigger_todos_updated_at
 BEFORE UPDATE ON todos
 FOR EACH ROW
 EXECUTE FUNCTION set_updated_at();
+```
 
+Design decisions:
 
-Fase 1 — Setup
+- users.id is UUID to avoid exposing the total number of registered users.
+- todos.id is SERIAL: real access protection doesn't rely on obscuring the ID, but on ownership validation in the service layer, so an auto-incrementing integer is more index-efficient without sacrificing security.
+- ON DELETE CASCADE on both relations to users, to keep referential consistency when a user is deleted.
+- updated_at is updated via a database trigger, not from the application layer, guaranteeing the value is correct regardless of where the UPDATE originates.
 
-Inicializar proyecto (npm init -y), instalar dependencias (express, pg, jsonwebtoken, bcrypt, dotenv, nodemon)
-Crear estructura de carpetas MVC
-.env.example y .gitignore
-config/env.js — validación fail-fast de variables de entorno
-config/db.js — pool de conexión a Supabase Postgres
-app.js mínimo con Express levantando y una ruta de salud (GET /health)
+## Authentication
 
-Fase 2 — Esquema de base de datos
+- Access token: JWT signed with HS256, 15-minute TTL, minimal payload (sub, iat, exp).
+- Refresh token: opaque random string (not a JWT), 7-day TTL, stored as a SHA-256 hash in the database and delivered to the client as an httpOnly cookie.
+- Rotation: every use of a refresh token invalidates it and issues a new one. Reuse of an already-revoked token revokes all active sessions for that user, as a safeguard against possible token theft.
 
-Tabla users (id UUID PK, name, email UNIQUE NOT NULL, password_hash, created_at)
-Tabla todos (id SERIAL PK, user_id FK → users, title, description, completed, created_at, updated_at)
-Tabla refresh_tokens (id, user_id FK, token_hash, expires_at, revoked)
-Constraints e índices (FK, UNIQUE en email, índice en todos.user_id)
+## Installation
 
-Fase 3 — Registro de usuario (POST /register)
+```bash
+git clone <repo-url>
+cd todo-list-api
+npm install
+cp .env.example .env
+```
 
-Validar datos de entrada (name, email, password)
-Verificar email único
-Hash de password con bcrypt
-Insertar usuario en BD
-Emitir access + refresh token
+Fill in .env with your credentials:
 
-Fase 4 — Login (POST /login)
+```
+PORT=3000
+DATABASE_URL=postgresql://user:password@host:port/database
+JWT_ACCESS_SECRET=
+JWT_REFRESH_SECRET=
+NODE_ENV=development
+```
 
-Validar credenciales contra BD (comparar hash)
-Emitir access token (JWT corto, HS256, payload mínimo)
-Emitir refresh token (opaco, hash SHA-256 guardado en BD)
+Generate strong secrets with:
 
-Fase 5 — Middleware de autenticación
+```bash
+node -e "console.log(require('crypto').randomBytes(64).toString('hex'))"
+```
 
-Verificar JWT del header Authorization
-Algoritmo fijado en backend (algorithms: ['HS256'])
-Manejo de 401 si token falta/inválido/expirado
+Run the SQL script from the section above in the Supabase SQL Editor to create the tables.
 
-Fase 6 — CRUD de to-dos
+## Usage
 
-POST /todos — crear (asociado a user_id del token)
-PUT /todos/:id — actualizar, con chequeo de ownership → 403 si no es dueño
-DELETE /todos/:id — eliminar, con ownership check, respuesta 204
-GET /todos?page=&limit= — listar con paginación y total
+```bash
+npm run dev
+```
 
-Fase 7 — Validación de entrada
+The server starts on http://localhost:3000 (or your configured port). Verify it's running with:
 
-Esquemas de validación para body de cada endpoint (register, login, create/update todo)
-Validación de query params de paginación
+```
+GET /health
+```
 
-Fase 8 — Manejo de errores centralizado
+## Endpoints
 
-Clase ApiError (statusCode + message)
-Middleware errorHandler.js
-Controllers usando try/catch + next(error)
+### Authentication
 
-Fase 9 — Seguridad adicional
+| Method | Route          | Description                                              | Auth required              |
+| ------ | -------------- | -------------------------------------------------------- | -------------------------- |
+| POST   | /auth/register | Registers a new user                                     | No                         |
+| POST   | /auth/login    | Authenticates a user                                     | No                         |
+| POST   | /auth/refresh  | Renews the access token using the refresh token (cookie) | No (requires valid cookie) |
+| POST   | /auth/logout   | Revokes the refresh token for the current session        | Yes                        |
 
-Rate limiting en /login y /register (fuerza bruta)
-Helmet (headers de seguridad: X-Content-Type-Options, X-Frame-Options, HSTS)
-No exponer password_hash ni tokens en respuestas
-Remover headers que revelan info (x-powered-by)
+POST /auth/register
 
-Fase 10 - Extras
+```json
+{
+  "name": "John Doe",
+  "email": "john@doe.com",
+  "password": "password123"
+}
+```
 
-Filtrado y ordenamiento en GET /todos
-Tests unitarios
-Rotación de refresh token (invalidar el usado, emitir nuevo)
-Throttling general de la API
-$$
+Response 201:
+
+```json
+{
+  "accessToken": "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9...",
+  "user": { "id": "uuid", "name": "John Doe", "email": "john@doe.com" }
+}
+```
+
+POST /auth/login
+
+```json
+{
+  "email": "john@doe.com",
+  "password": "password123"
+}
+```
+
+### Tasks (to-dos)
+
+All routes require the Authorization: Bearer <accessToken> header.
+
+| Method | Route                  | Description                       |
+| ------ | ---------------------- | --------------------------------- |
+| POST   | /todos                 | Creates a task                    |
+| GET    | /todos?page=1&limit=10 | Lists the user's tasks, paginated |
+| PUT    | /todos/:id             | Updates a task (owner only)       |
+| DELETE | /todos/:id             | Deletes a task (owner only)       |
+
+POST /todos
+
+```json
+{
+  "title": "Buy groceries",
+  "description": "Buy milk, eggs, and bread"
+}
+```
+
+Response 201:
+
+```json
+{
+  "id": 1,
+  "user_id": "uuid",
+  "title": "Buy groceries",
+  "description": "Buy milk, eggs, and bread",
+  "completed": false,
+  "created_at": "...",
+  "updated_at": "..."
+}
+```
+
+GET /todos?page=1&limit=10
+
+Response 200:
+
+```json
+{
+  "data": [
+    {
+      "id": 1,
+      "title": "Buy groceries",
+      "description": "...",
+      "completed": false
+    }
+  ],
+  "page": 1,
+  "limit": 10,
+  "total": 2
+}
+```
+
+Common error codes:
+
+| Code | Meaning                                                            |
+| ---- | ------------------------------------------------------------------ |
+| 400  | Input validation error                                             |
+| 401  | Not authenticated (token missing, invalid, or expired)             |
+| 403  | Authenticated but not authorized for this resource (not the owner) |
+| 404  | Resource not found                                                 |
+| 409  | Conflict (e.g. email already registered)                           |
+| 429  | Too many requests (rate limit exceeded)                            |
+
+## Security
+
+- Passwords hashed with bcrypt (12 salt rounds)
+- Refresh token delivered as an httpOnly cookie with sameSite: strict
+- JWT algorithm explicitly pinned on the backend (HS256) during verification, to prevent algorithm confusion attacks
+- Rate limiting on /auth/register and /auth/login (5 attempts / 15 minutes) to mitigate brute force
+- Security headers via Helmet (X-Content-Type-Options, X-Frame-Options, CSP)
+- X-Powered-By header disabled
+- Sensitive data (password_hash, tokens) never included in API responses
